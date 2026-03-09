@@ -1,44 +1,35 @@
 # ==============================================================================
 # IMPORT REQUIRED LIBRARIES
 # ==============================================================================
-import tables             # Library to read Nastran HDF5 (.h5) binary database files
+import tables             # Library to read Nastran HDF5 binary database files
 import pandas as pd       # Library for data manipulation, table creation, and Excel export
 import numpy as np        # Library for high-performance vectorized mathematical operations
 import os                 # Library to interact with the Operating System (paths, files)
 import glob               # Library to search for files with specific extensions (like .h5)
 import re                 # Library for Regular Expressions (used for text cleaning)
-from tqdm import tqdm     # Library to display progress bars in terminal (optional here)
-from xlsxwriter.utility import xl_col_to_name # Library to format Excel columns dynamically
+from tqdm import tqdm     # Library to display progress bars in terminal
+from xlsxwriter.utility import xl_col_to_name # Library to format Excel columns
 import matplotlib.pyplot as plt # Standard library for generating 2D graphs
 import seaborn as sns     # Advanced visualization library for better-looking charts
 import warnings           # Library to handle system warnings
-import gc                 # Garbage collector for RAM management (cleans memory after reading large files)
+import gc                 # Garbage collector for RAM management
 
-# Suppress unnecessary matplotlib warnings to keep the terminal clean
-warnings.filterwarnings("ignore") 
+warnings.filterwarnings("ignore") # Suppress unnecessary matplotlib warnings
 
 # ==============================================================================
 # 1. STRING CLEANER & UTILITIES
 # ==============================================================================
 def clean_subtitle(text):
-    """ 
-    Cleans byte strings (e.g., b'loadcase1') from Nastran H5 into normal strings.
-    Nastran often stores text in binary format, this converts it back to readable text.
-    """
-    # If the text is in bytes, decode it to utf-8 string
+    """ Cleans byte strings from Nastran H5 into normal strings """
     if isinstance(text, bytes): 
         text = text.decode('utf-8', errors='ignore')
     text = str(text).strip()
-    
-    # Remove the b'...' or b"..." wrapper if it accidentally remains
-    if (text.startswith("b'") and text.endswith("'")) or (text.startswith('b"') and text.endswith('"')): 
+    if (text.startswith("b'") and text.endswith("'")) or (text.startswith('b"') and text.endswith('"')):
         text = text[2:-1]
-        
-    # Remove any stray quotation marks and spaces
     return text.replace("'", "").replace('"', '').strip()
 
-def safe_filename(text): 
-    """ Replaces illegal characters (like slashes or colons) in a string to safely save image files """
+def safe_filename(text):
+    """ Replaces illegal characters in a string for safely saving image files """
     return re.sub(r'[^A-Za-z0-9_\-\.]', '_', text)
 
 # ==============================================================================
@@ -49,53 +40,38 @@ def analyze_composite_failure(df, props):
     Core mathematical engine to calculate Failure Indices (FI), Reserve Factors (RF), and Margins of Safety (MS).
     Includes: Max Stress, Max Strain, Tsai-Hill, Tsai-Wu, Hashin, Puck, and Interlaminar Shear.
     """
-    # Extract stiffness properties
     E1, E2, nu12, G12 = props['E1'], props['E2'], props['nu12'], props['G12']
     
-    # SAFEGUARD: Prevent ZeroDivisionError for strength values
-    # If a strength value is 0 (forgotten input), it changes it to infinity (1e12) so it never fails
+    # SAFEGUARD: Prevent ZeroDivisionError for strengths
     def enforce_limit(val): return abs(val) if abs(val) > 1e-6 else 1e12 
         
-    # Extract strength properties and ensure they are absolute positive numbers
     Xt, Xc = enforce_limit(props['Xt']), enforce_limit(props['Xc'])
     Yt, Yc = enforce_limit(props['Yt']), enforce_limit(props['Yc'])
     S = enforce_limit(props['S'])
-    S13 = enforce_limit(props.get('S13', S)) # Interlaminar Shear XZ (Defaults to In-Plane S if missing)
-    S23 = enforce_limit(props.get('S23', S)) # Interlaminar Shear YZ (Defaults to In-Plane S if missing)
+    S13 = enforce_limit(props.get('S13', S)) 
+    S23 = enforce_limit(props.get('S23', S)) 
 
-    # Extract applied stresses as numpy arrays for extreme calculation speed (vectorization)
+    # Extract applied stresses as numpy arrays for extreme calculation speed
     s1, s2, t12 = df['Sigma_11'].values, df['Sigma_22'].values, df['Tau_12'].values
-    
-    # Safely extract Interlaminar stresses (if they exist in the Nastran file, otherwise assume 0)
     t13 = df['Tau_13'].values if 'Tau_13' in df.columns else np.zeros_like(s1)
     t23 = df['Tau_23'].values if 'Tau_23' in df.columns else np.zeros_like(s1)
 
-    # Internal helper function to calculate Reserve Factor (RF) and Margin of Safety (MS)
+    # Helper function for RF and MS calculation
     def calc_rf_ms(fi_array, is_quadratic=False):
-        # If the formula is quadratic (like Tsai-Hill), RF = 1 / sqrt(FI)
-        if is_quadratic: rf = np.where(fi_array > 1e-8, 1.0 / np.sqrt(fi_array), 999.9)
-        # If the formula is linear (like Max Stress), RF = 1 / FI
-        else: rf = np.where(fi_array > 1e-8, 1.0 / fi_array, 999.9)
-        
-        # Margin of Safety is always RF - 1
+        if is_quadratic:
+            rf = np.where(fi_array > 1e-8, 1.0 / np.sqrt(fi_array), 999.9)
+        else:
+            rf = np.where(fi_array > 1e-8, 1.0 / fi_array, 999.9)
         ms = rf - 1.0
         return rf, ms
 
-    # ---------------------------------------------------------
-    # A. MAXIMUM STRESS CRITERION
-    # ---------------------------------------------------------
-    # Compare s1 to Xt (if tension) or Xc (if compression)
+    # --- A. MAXIMUM STRESS CRITERION ---
     fi_1_maxs = np.where(s1 > 0, s1 / Xt, np.abs(s1) / Xc)
-    # Compare s2 to Yt (if tension) or Yc (if compression)
     fi_2_maxs = np.where(s2 > 0, s2 / Yt, np.abs(s2) / Yc)
-    # Compare Shear to S
     fi_12_maxs = np.abs(t12) / S 
-    
-    # The final FI is the maximum value among the three directions
     fi_max_stress = np.maximum.reduce([fi_1_maxs, fi_2_maxs, fi_12_maxs])
     rf_max_stress, ms_max_stress = calc_rf_ms(fi_max_stress, is_quadratic=False)
 
-    # Determine the specific failure mode text for Max Stress
     modes_ms = []
     for f1, f2, fm, sig1, sig2 in zip(fi_1_maxs, fi_2_maxs, fi_max_stress, s1, s2):
         if fm < 1e-6: modes_ms.append("Safe")
@@ -105,63 +81,42 @@ def analyze_composite_failure(df, props):
         elif fm == f2 and sig2 <= 0: modes_ms.append("Matrix Compression")
         else: modes_ms.append("In-Plane Shear")
 
-    # ---------------------------------------------------------
-    # B. MAXIMUM STRAIN CRITERION
-    # ---------------------------------------------------------
-    # Convert strength limits into strain limits using Hooke's Law
+    # --- B. MAXIMUM STRAIN CRITERION ---
     eps_1T, eps_1C = Xt / E1, Xc / E1; eps_2T, eps_2C = Yt / E2, Yc / E2; gamma_12u = S / G12
     nu21 = (nu12 * E2) / E1 if E1 > 1e-6 else 0.0
-    
-    # Convert applied stresses into actual applied strains
     eps1_act = (s1 / E1) - (nu21 * s2 / E2); eps2_act = -(nu12 * s1 / E1) + (s2 / E2); gamma12_act = t12 / G12
     
-    # Calculate Strain Failure Indices
     fi_1_maxe = np.where(eps1_act > 0, eps1_act / eps_1T, np.abs(eps1_act) / eps_1C)
     fi_2_maxe = np.where(eps2_act > 0, eps2_act / eps_2T, np.abs(eps2_act) / eps_2C)
     fi_12_maxe = np.abs(gamma12_act) / gamma_12u
-    
     fi_max_strain = np.maximum.reduce([fi_1_maxe, fi_2_maxe, fi_12_maxe])
     rf_max_strain, ms_max_strain = calc_rf_ms(fi_max_strain, is_quadratic=False)
 
-    # ---------------------------------------------------------
-    # C. TSAI-HILL CRITERION (Quadratic Interactive)
-    # ---------------------------------------------------------
-    # Dynamically select X and Y limits based on the current stress sign
+    # --- C. TSAI-HILL CRITERION ---
     X_hill = np.where(s1 > 0, Xt, Xc); Y_hill = np.where(s2 > 0, Yt, Yc)
-    # Tsai-Hill equation
     fi_tsai_hill = (s1 / X_hill)**2 - (s1 * s2) / (X_hill**2) + (s2 / Y_hill)**2 + (t12 / S)**2
     rf_tsai_hill, ms_tsai_hill = calc_rf_ms(fi_tsai_hill, is_quadratic=True)
 
-    # ---------------------------------------------------------
-    # D. TSAI-WU CRITERION (Tensor Polynomial)
-    # ---------------------------------------------------------
-    # Calculate Tsai-Wu strength tensor coefficients
+    # --- D. TSAI-WU CRITERION ---
     F1 = (1.0 / Xt) - (1.0 / Xc); F2 = (1.0 / Yt) - (1.0 / Yc)
     F11 = 1.0 / (Xt * Xc); F22 = 1.0 / (Yt * Yc); F66 = 1.0 / (S**2)
-    F12 = -0.5 * np.sqrt(F11 * F22) # Hoffman/Mises empirical assumption
-    
-    # Calculate Failure Index
+    F12 = -0.5 * np.sqrt(F11 * F22) 
     fi_tsai_wu = F1*s1 + F2*s2 + F11*(s1**2) + F22*(s2**2) + F66*(t12**2) + 2*F12*s1*s2
     
-    # Calculate Tsai-Wu Reserve Factor using Quadratic Roots (A*R^2 + B*R - 1 = 0)
     A_tw = F11*(s1**2) + F22*(s2**2) + F66*(t12**2) + 2*F12*s1*s2; B_tw = F1*s1 + F2*s2
     rf_tsai_wu = np.zeros_like(s1, dtype=float)
     mask_quad = A_tw > 1e-12 
     rf_tsai_wu[mask_quad] = (-B_tw[mask_quad] + np.sqrt(B_tw[mask_quad]**2 + 4 * A_tw[mask_quad])) / (2 * A_tw[mask_quad])
-    mask_lin = (A_tw <= 1e-12) & (B_tw > 1e-12) # For purely linear cases
+    mask_lin = (A_tw <= 1e-12) & (B_tw > 1e-12)
     rf_tsai_wu[mask_lin] = 1.0 / B_tw[mask_lin]
     rf_tsai_wu[(A_tw <= 1e-12) & (B_tw <= 1e-12)] = 999.9
     ms_tsai_wu = rf_tsai_wu - 1.0
 
-    # ---------------------------------------------------------
-    # E. HASHIN CRITERION (1980 2D)
-    # ---------------------------------------------------------
-    # Hashin separates failure into 4 distinct equations
-    fi_h_ft = np.where(s1 > 0, (s1/Xt)**2 + (t12/S)**2, 0) # Fiber Tension
-    fi_h_fc = np.where(s1 <= 0, (np.abs(s1)/Xc)**2, 0)     # Fiber Compression
-    fi_h_mt = np.where(s2 > 0, (s2/Yt)**2 + (t12/S)**2, 0) # Matrix Tension
-    fi_h_mc = np.where(s2 <= 0, (np.abs(s2)/Yc)**2 + (t12/S)**2, 0) # Matrix Compression
-    
+    # --- E. HASHIN CRITERION (1980 2D) ---
+    fi_h_ft = np.where(s1 > 0, (s1/Xt)**2 + (t12/S)**2, 0)
+    fi_h_fc = np.where(s1 <= 0, (np.abs(s1)/Xc)**2, 0)
+    fi_h_mt = np.where(s2 > 0, (s2/Yt)**2 + (t12/S)**2, 0)
+    fi_h_mc = np.where(s2 <= 0, (np.abs(s2)/Yc)**2 + (t12/S)**2, 0)
     fi_hashin = np.maximum.reduce([fi_h_ft, fi_h_fc, fi_h_mt, fi_h_mc])
     rf_hashin, ms_hashin = calc_rf_ms(fi_hashin, is_quadratic=True)
 
@@ -173,22 +128,15 @@ def analyze_composite_failure(df, props):
         elif fm == mt: hashin_modes.append("Matrix Tension")
         else: hashin_modes.append("Matrix Compression")
 
-    # ---------------------------------------------------------
-    # F. PUCK 2D CRITERION (Action Plane)
-    # ---------------------------------------------------------
-    # Typical inclination parameters for Carbon/Glass Fiber Reinforced Polymers
+    # --- F. PUCK 2D CRITERION (Action Plane) ---
     p12_plus = 0.3; p12_minus = 0.25; p22_minus = 0.2 
     
-    # 1. Fiber Failure (FF)
     fi_p_ff_t = np.where(s1 >= 0, s1/Xt, 0)
     fi_p_ff_c = np.where(s1 < 0, np.abs(s1)/Xc, 0)
     
-    # 2. Inter-Fiber Failure (IFF) - Matrix Cracking
-    # Mode A (Tension)
     termA = np.sqrt((t12/S)**2 + (1 - p12_plus*Yt/S)**2 * (s2/Yt)**2) + p12_plus*s2/S
     fi_p_iff_a = np.where(s2 > 0, termA, 0)
     
-    # Mode B & C (Compression)
     R_tt_A = Yc / (2 * (1 + p22_minus))
     slope = np.abs(s2 / (np.abs(t12) + 1e-12))
     slope_limit = R_tt_A / S
@@ -197,7 +145,7 @@ def analyze_composite_failure(df, props):
     fi_p_iff_c = np.where((s2 <= 0) & (slope > slope_limit), ((t12/(2*(1+p22_minus)*S))**2 + (s2/Yc)**2) * (Yc/(np.abs(s2)+1e-12)), 0)
     
     fi_puck = np.maximum.reduce([fi_p_ff_t, fi_p_ff_c, fi_p_iff_a, fi_p_iff_b, fi_p_iff_c])
-    rf_puck, ms_puck = calc_rf_ms(fi_puck, is_quadratic=False) # Puck uses linear formulation for RF
+    rf_puck, ms_puck = calc_rf_ms(fi_puck, is_quadratic=False) 
 
     puck_modes = []
     for fft, ffc, ia, ib, ic, fm in zip(fi_p_ff_t, fi_p_ff_c, fi_p_iff_a, fi_p_iff_b, fi_p_iff_c, fi_puck):
@@ -208,16 +156,11 @@ def analyze_composite_failure(df, props):
         elif fm == ib: puck_modes.append("IFF Mode B (Compression)")
         else: puck_modes.append("IFF Mode C (Compression)")
 
-    # ---------------------------------------------------------
-    # G. INTERLAMINAR SHEAR (DELAMINATION)
-    # ---------------------------------------------------------
-    # Evaluates out-of-plane shear stresses for delamination risk
+    # --- G. INTERLAMINAR SHEAR (DELAMINATION) ---
     fi_ils = (t13 / S13)**2 + (t23 / S23)**2
     rf_ils, ms_ils = calc_rf_ms(fi_ils, is_quadratic=True)
 
-    # ---------------------------------------------------------
-    # COMPILE ALL RESULTS
-    # ---------------------------------------------------------
+    # --- COMPILE OUTPUT DATAFRAME ---
     out_df = df.copy()
     out_df['Max_Stress_FI'] = fi_max_stress; out_df['Max_Stress_RF'] = rf_max_stress; out_df['Max_Stress_MS'] = ms_max_stress; out_df['Max_Stress_Mode'] = modes_ms
     out_df['Max_Strain_FI'] = fi_max_strain; out_df['Max_Strain_RF'] = rf_max_strain; out_df['Max_Strain_MS'] = ms_max_strain
@@ -233,33 +176,27 @@ def analyze_composite_failure(df, props):
 # 3. ABD LAMINATE MATRIX CALCULATOR (CLASSICAL LAMINATED PLATE THEORY)
 # ==============================================================================
 def calculate_abd_matrices(pcomp_raw_dict, props):
-    """ Builds the A (Extensional), B (Coupling), and D (Bending) matrices for every PCOMP defined in Nastran """
+    """ Builds the A (Extensional), B (Coupling), and D (Bending) matrices for PCOMP """
     if not pcomp_raw_dict: return None
     E1, E2, nu12, G12 = props['E1'], props['E2'], props['nu12'], props['G12']
     if E1 < 1e-6 or E2 < 1e-6: return None
     
-    # Calculate minor Poisson's ratio and the denominator
     nu21 = nu12 * E2 / E1
     den = 1.0 - nu12 * nu21
-    
-    # Lamina stiffness matrix components (Q)
     Q11 = E1 / den; Q22 = E2 / den; Q12 = nu12 * E2 / den; Q66 = G12
     
     abd_rows = []
-    # Loop through each Property ID (PID)
     for pid, plies in pcomp_raw_dict.items():
         total_t = sum([p['t'] for p in plies])
-        z_curr = -total_t / 2.0 # Start from the bottom of the laminate
+        z_curr = -total_t / 2.0
         A = np.zeros((3,3)); B = np.zeros((3,3)); D = np.zeros((3,3))
         
-        # Loop through each ply in the laminate
         for ply in plies:
             t = ply['t']; theta = np.radians(ply['theta'])
             z_prev = z_curr; z_curr += t
             m = np.cos(theta); n = np.sin(theta)
             m2, n2, m4, n4 = m**2, n**2, m**4, n**4
             
-            # Transformed Reduced Stiffness Matrix (Q-bar)
             Qbar = np.zeros((3,3))
             Qbar[0,0] = Q11*m4 + 2*(Q12 + 2*Q66)*m2*n2 + Q22*n4
             Qbar[1,1] = Q11*n4 + 2*(Q12 + 2*Q66)*m2*n2 + Q22*m4
@@ -268,12 +205,10 @@ def calculate_abd_matrices(pcomp_raw_dict, props):
             Qbar[0,2] = (Q11 - Q12 - 2*Q66)*n*m**3 + (Q12 - Q22 + 2*Q66)*n**3*m; Qbar[2,0] = Qbar[0,2]
             Qbar[1,2] = (Q11 - Q12 - 2*Q66)*m*n**3 + (Q12 - Q22 + 2*Q66)*m**3*n; Qbar[2,1] = Qbar[1,2]
 
-            # Integrate over the thickness to get A, B, D
             A += Qbar * (z_curr - z_prev)
             B += 0.5 * Qbar * (z_curr**2 - z_prev**2)
             D += (1.0/3.0) * Qbar * (z_curr**3 - z_prev**3)
             
-        # Append matrices to a list for DataFrame creation
         abd_rows.append({'Property ID': pid, 'Matrix Type': 'A (Extensional)', '11': A[0,0], '12': A[0,1], '16': A[0,2], '22': A[1,1], '26': A[1,2], '66': A[2,2]})
         abd_rows.append({'Property ID': pid, 'Matrix Type': 'B (Coupling)', '11': B[0,0], '12': B[0,1], '16': B[0,2], '22': B[1,1], '26': B[1,2], '66': B[2,2]})
         abd_rows.append({'Property ID': pid, 'Matrix Type': 'D (Bending)', '11': D[0,0], '12': D[0,1], '16': D[0,2], '22': D[1,1], '26': D[1,2], '66': D[2,2]})
@@ -291,37 +226,31 @@ def create_failure_envelopes(df_res, props, base_name, unit_str):
     Xt, Xc = abs(props['Xt']), abs(props['Xc'])
     Yt, Yc = abs(props['Yt']), abs(props['Yc'])
     
-    # Tsai-Wu coefficients for plotting
     F1 = (1.0 / Xt) - (1.0 / Xc); F2 = (1.0 / Yt) - (1.0 / Yc)
     F11 = 1.0 / (Xt * Xc); F22 = 1.0 / (Yt * Yc)
     F12 = -0.5 * np.sqrt(F11 * F22) 
     
-    # Create meshgrid for the ellipse contour calculation
     s1_vals = np.linspace(-Xc*1.3, Xt*1.3, 400)
     s2_vals = np.linspace(-Yc*1.3, Yt*1.3, 400)
     S1, S2 = np.meshgrid(s1_vals, s2_vals)
-    # The Equation of the ellipse (assuming Tau_12 = 0 for the 2D plane view)
     Z = F11*(S1**2) + F22*(S2**2) + F1*S1 + F2*S2 + 2*F12*S1*S2
     
     load_cases = df_res['Load_Case'].unique()
     images_dict = {}
 
-    # Define dynamic column names based on selected units
-    col_s1 = f'Sigma_11 [{unit_str}]'
-    col_s2 = f'Sigma_22 [{unit_str}]'
+    col_s1 = 'Sigma_11'
+    col_s2 = 'Sigma_22'
 
     for lc in load_cases:
         safe_lc = safe_filename(str(lc))
         df_lc = df_res[df_res['Load_Case'] == lc]
         
         plt.figure(figsize=(9, 7))
-        # Draw the Red dashed ellipse at Z = 1.0 (The boundary of failure)
         plt.contour(S1, S2, Z, levels=[1.0], colors='red', linewidths=2.5, linestyles='dashed')
         
         safe_mask = df_lc['Tsai_Wu_FI'] < 1.0
         failed_mask = df_lc['Tsai_Wu_FI'] >= 1.0
         
-        # Scatter Safe elements (Green) and Failed elements (Red X)
         plt.scatter(df_lc[safe_mask][col_s1], df_lc[safe_mask][col_s2], color='green', alpha=0.6, s=25, label='Safe Elements (FI < 1)')
         plt.scatter(df_lc[failed_mask][col_s1], df_lc[failed_mask][col_s2], color='red', marker='X', s=45, label='Failed Elements (FI >= 1)')
         
@@ -337,7 +266,7 @@ def create_failure_envelopes(df_res, props, base_name, unit_str):
         img_name = f"Envelope_{safe_lc}.png"
         plt.savefig(img_name, dpi=150)
         plt.close()
-        images_dict[lc] = img_name # Save path for Excel insertion
+        images_dict[lc] = img_name
         
     return images_dict
 
@@ -345,7 +274,6 @@ def create_failure_envelopes(df_res, props, base_name, unit_str):
 # 5. H5 DATA MINING (STRESSES, MAT8, PCOMP, SUBTITLES)
 # ==============================================================================
 def parse_bdf_subtitles(bdf_filepath):
-    """ Scans the BDF/DAT file to match Subcase IDs with their human-readable Subtitles """
     subcase_dict = {}
     if not bdf_filepath or not os.path.exists(bdf_filepath): return subcase_dict
     try:
@@ -364,7 +292,6 @@ def parse_bdf_subtitles(bdf_filepath):
     return subcase_dict
 
 def extract_mat8_h5(input_file, conv_factor):
-    """ Extracts Material Properties (MAT8) directly from H5 and applies unit conversion """
     mat_dict = {}
     try:
         h5 = tables.open_file(input_file, mode="r")
@@ -388,11 +315,9 @@ def extract_mat8_h5(input_file, conv_factor):
     return mat_dict
 
 def extract_composite_h5(input_file, bdf_file=None):
-    """ Main extraction function capturing Stresses, Subtitles, and PCOMP details. """
     print(f"    [+] Extracting Data & PCOMP from H5: {os.path.basename(input_file)} ...")
     h5 = tables.open_file(input_file, mode="r") 
     
-    # 1. READ LOAD CASES FROM H5
     bdf_subtitles = parse_bdf_subtitles(bdf_file)
     domain_to_subcase = {} 
     try:
@@ -412,18 +337,15 @@ def extract_composite_h5(input_file, bdf_file=None):
         real_subcase = domain_to_subcase.get(domain_id, domain_id)
         return bdf_subtitles.get(real_subcase, f"Subcase {real_subcase}")
 
-    # 2. READ PCOMP PLY INFO (ANGLE & THICKNESS)
     ply_metadata = {}; pcomp_raw = {}
     try:
         eid_to_pid = {}
-        # Map Element ID to Property ID
         if hasattr(h5.root.NASTRAN.INPUT.ELEMENT, 'CQUAD4'):
             for row in h5.root.NASTRAN.INPUT.ELEMENT.CQUAD4.read(): eid_to_pid[row['EID']] = row['PID']
         if hasattr(h5.root.NASTRAN.INPUT.ELEMENT, 'CTRIA3'):
             for row in h5.root.NASTRAN.INPUT.ELEMENT.CTRIA3.read(): eid_to_pid[row['EID']] = row['PID']
                 
         pid_to_plies = {}
-        # Get Layup details from PCOMP
         if hasattr(h5.root.NASTRAN.INPUT.PROPERTY, 'PCOMP'):
             for row in h5.root.NASTRAN.INPUT.PROPERTY.PCOMP.read():
                 pid = row['ID'] if 'ID' in row.dtype.names else row['PID']
@@ -431,7 +353,7 @@ def extract_composite_h5(input_file, bdf_file=None):
                     pid_to_plies[pid] = {}; raw_plies = []
                     ply_counter = 1
                     for theta, t in zip(row['THETA'], row['T']):
-                        if t > 0: # Exclude zero-thickness dummy layers
+                        if t > 0: 
                             pid_to_plies[pid][ply_counter] = f"Ply {ply_counter} [{theta}° | t={t}]"
                             raw_plies.append({'ply': ply_counter, 'theta': theta, 't': t})
                             ply_counter += 1
@@ -445,7 +367,6 @@ def extract_composite_h5(input_file, bdf_file=None):
         try: return ply_metadata[eid][int(ply_id)]
         except: return f"Ply {ply_id}"
 
-    # 3. READ COMPOSITE STRESSES (QUAD & TRIA)
     df_list = []
     element_types = ['QUAD4_COMP', 'TRIA3_COMP']
     
@@ -467,7 +388,6 @@ def extract_composite_h5(input_file, bdf_file=None):
                 df_temp['Ply Info'] = [get_ply_string(e, p) for e, p in zip(data['EID'], raw_plies)]
                 df_temp['Load_Case'] = [get_load_case_name(d_id) for d_id in data['DOMAIN_ID']] if 'DOMAIN_ID' in cols else "Subcase 1"
                 
-                # Extract In-Plane Stresses
                 if 'X1' in cols and 'Y1' in cols and 'T1' in cols:
                     df_temp['Sigma_11'] = data['X1']; df_temp['Sigma_22'] = data['Y1']; df_temp['Tau_12'] = data['T1']
                 elif 'X' in cols and 'Y' in cols and 'TXY' in cols:
@@ -476,7 +396,6 @@ def extract_composite_h5(input_file, bdf_file=None):
                     df_temp['Sigma_11'] = data['X_NORMAL']; df_temp['Sigma_22'] = data['Y_NORMAL']; df_temp['Tau_12'] = data['XY_SHEAR']
                 else: continue
                 
-                # Extract Interlaminar Shear Stresses
                 if 'L1' in cols and 'L2' in cols:
                     df_temp['Tau_13'] = data['L1']; df_temp['Tau_23'] = data['L2']
                 elif 'XZ_SHEAR' in cols and 'YZ_SHEAR' in cols:
@@ -503,15 +422,13 @@ def extract_composite_h5(input_file, bdf_file=None):
     return df_raw, pcomp_raw
 
 # ==============================================================================
-# 6. 6-SHEET PROFESSIONAL EXCEL EXPORT
+# 6. EXCEL EXPORT (NO NUMBERING IN SHEET NAMES)
 # ==============================================================================
 def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name, img_dict, unit_str):
-    """ Compiles a beautifully formatted 6-sheet Excel report automatically """
-    print(f"\n[STEP 7] 📑 Compiling 6-Sheet Expert Report: {os.path.basename(output_excel)}...")
+    print(f"\n[STEP 7] 📑 Compiling Expert Report: {os.path.basename(output_excel)}...")
     writer = pd.ExcelWriter(output_excel, engine='xlsxwriter') 
     wb = writer.book
     
-    # Establish formats
     fmt_title = wb.add_format({'bold':True, 'font_size':16, 'fg_color':'#1F497D', 'font_color':'white', 'border':1, 'align':'center', 'valign':'vcenter'})
     fmt_head  = wb.add_format({'bold':True, 'fg_color':'#2F75B5', 'font_color':'white', 'border':1, 'align':'center', 'valign':'vcenter', 'text_wrap': True})
     fmt_gen   = wb.add_format({'border':1, 'align':'center'}) 
@@ -520,7 +437,7 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
     fmt_red   = wb.add_format({'font_color':'#9C0006', 'bg_color':'#FFC7CE', 'border':1, 'align':'center'}) 
     fmt_grn   = wb.add_format({'font_color':'#006100', 'bg_color':'#C6EFCE', 'border':1, 'align':'center'}) 
 
-    # Rename stress columns dynamically to include the selected unit
+    # Dynamic Column renaming for units (Applied to headers only)
     df_formatted = df_res.rename(columns={
         'Sigma_11': f'Sigma_11 [{unit_str}]',
         'Sigma_22': f'Sigma_22 [{unit_str}]',
@@ -529,8 +446,8 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
         'Tau_23': f'Tau_23 [{unit_str}]'
     })
 
-    # --- SHEET 1: EXECUTIVE SUMMARY ---
-    ws_sum = wb.add_worksheet('1_Executive_Summary')
+    # --- SHEET: EXECUTIVE SUMMARY ---
+    ws_sum = wb.add_worksheet('Executive_Summary')
     ws_sum.merge_range('B2:H3', f"AEROSPACE COMPOSITE ANALYSIS REPORT", fmt_title)
     ws_sum.write('B4', f"File: {base_name}.h5", wb.add_format({'italic':True}))
     
@@ -551,7 +468,6 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
         grouped = df_formatted.groupby('Load_Case', observed=True)
         for lc_name, group in grouped:
             if group.empty: continue
-            # Find the most critical row based on Tsai-Wu MS
             worst_row = group.loc[group['Tsai_Wu_MS'].idxmin()]
             
             ws_sum.write(row_idx, 1, str(lc_name), fmt_gen)
@@ -565,7 +481,6 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
     ws_sum.set_column('B:B', 30); ws_sum.set_column('C:H', 20)
 
     def write_sheet(df, name, specific_cols):
-        """ Internal helper to write sub-dataframes into specific Excel sheets """
         df_sub = df[specific_cols]
         df_sub.to_excel(writer, sheet_name=name, index=False)
         ws = writer.sheets[name]
@@ -583,36 +498,35 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
             elif 'MS' in col: 
                 ws.set_column(i, i, 15, fmt_num4)
                 col_let = xl_col_to_name(i)
-                # Conditional formatting: Red if < 0, Green if >= 0
                 ws.conditional_format(f'{col_let}2:{col_let}{last_row}', {'type':'cell', 'criteria':'<', 'value':0, 'format':fmt_red})
                 ws.conditional_format(f'{col_let}2:{col_let}{last_row}', {'type':'cell', 'criteria':'>=', 'value':0, 'format':fmt_grn})
             else: ws.set_column(i, i, 12, fmt_gen)
 
-    # --- SHEET 2: RAW STRESSES ---
+    # --- SHEET: RAW STRESSES ---
     raw_cols = ['Load_Case', 'Element ID', 'Element Type', 'Ply Info', 
                 f'Sigma_11 [{unit_str}]', f'Sigma_22 [{unit_str}]', 
                 f'Tau_12 [{unit_str}]', f'Tau_13 [{unit_str}]', f'Tau_23 [{unit_str}]']
-    write_sheet(df_formatted, '2_Raw_Stresses', raw_cols)
+    write_sheet(df_formatted, 'Raw_Stresses', raw_cols)
 
-    # --- SHEET 3: BASIC CRITERIA ---
+    # --- SHEET: BASIC CRITERIA ---
     basic_cols = ['Load_Case', 'Element ID', 'Ply Info', 'Max_Stress_FI', 'Max_Stress_RF', 'Max_Stress_MS', 'Max_Stress_Mode', 'Max_Strain_FI', 'Max_Strain_RF', 'Max_Strain_MS']
-    write_sheet(df_formatted, '3_Basic_Criteria', basic_cols)
+    write_sheet(df_formatted, 'Basic_Criteria', basic_cols)
 
-    # --- SHEET 4: ADVANCED CRITERIA ---
+    # --- SHEET: ADVANCED CRITERIA ---
     adv_cols = ['Load_Case', 'Element ID', 'Ply Info', 'Tsai_Hill_FI', 'Tsai_Hill_RF', 'Tsai_Hill_MS', 'Tsai_Wu_FI', 'Tsai_Wu_RF', 'Tsai_Wu_MS', 'Hashin_FI', 'Hashin_RF', 'Hashin_MS', 'Hashin_Mode', 'Puck_FI', 'Puck_RF', 'Puck_MS', 'Puck_Mode', 'Interlaminar_FI', 'Interlaminar_RF', 'Interlaminar_MS']
-    write_sheet(df_formatted, '4_Advanced_Criteria', adv_cols)
+    write_sheet(df_formatted, 'Advanced_Criteria', adv_cols)
 
-    # --- SHEET 5: ABD MATRICES ---
+    # --- SHEET: ABD MATRICES ---
     if df_abd is not None and not df_abd.empty:
-        df_abd.to_excel(writer, sheet_name='5_Laminate_ABD', index=False)
-        ws_abd = writer.sheets['5_Laminate_ABD']
+        df_abd.to_excel(writer, sheet_name='Laminate_ABD', index=False)
+        ws_abd = writer.sheets['Laminate_ABD']
         ws_abd.freeze_panes(1, 0)
         for i, c in enumerate(df_abd.columns): 
             ws_abd.write(0, i, c, fmt_head)
             ws_abd.set_column(i, i, 20, fmt_gen if i < 2 else fmt_num2)
 
-    # --- SHEET 6: VISUAL GRAPHS ---
-    ws_g = wb.add_worksheet('6_Visual_Graphs')
+    # --- SHEET: VISUAL GRAPHS ---
+    ws_g = wb.add_worksheet('Visual_Graphs')
     ws_g.merge_range('B2:M3', "FAILURE ENVELOPE VISUALIZATION", fmt_title)
     ws_g.hide_gridlines(2)
     
@@ -624,14 +538,12 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
         row_img += 38
 
     writer.close()
-    
-    # Auto-cleanup PNGs after inserting into Excel
     for img_file in img_dict.values():
         try: os.remove(img_file)
         except: pass
 
 # ==============================================================================
-# 7. SMART MANUAL CALCULATOR (SELECT THEORY & RF)
+# 7. SMART MANUAL CALCULATOR (MENU FOR THEORIES & RF)
 # ==============================================================================
 def manual_composite_input():
     print("\n" + "╔════════════════════════════════════════════════════════════╗")
@@ -762,7 +674,7 @@ def main():
         print("║      🚀 AEROSPACE COMPOSITE GOD-TIER SUITE (ALL FEATURES)       ║")
         print("╚═════════════════════════════════════════════════════════════════╝")
         print("Select the operation mode you want to use:")
-        print("  [1] 📁 Analyze .h5 File (6-Sheet Excel, ABD Matrix & Graphs)")
+        print("  [1] 📁 Analyze .h5 File (Export Excel, ABD Matrix & Graphs)")
         print("  [2] 🧮 Manual Calculator (Select Theory & Reserve Factor)")
         print("  [0] Exit Application")
         
@@ -886,7 +798,7 @@ def main():
             save_composite_report_6sheets(df_results, df_abd, mat_selected, output_excel, base_name, img_dict, unit_str)
             
             print("\n" + "═"*65)
-            print(f" 🎉 SUCCESS! 6-SHEET EXCEL GENERATED: {os.path.basename(output_excel)}")
+            print(f" 🎉 SUCCESS! EXCEL REPORT GENERATED: {os.path.basename(output_excel)}")
             print("═"*65 + "\n")
             
             input("Press Enter to return to Main Menu...")
