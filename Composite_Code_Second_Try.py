@@ -1,4 +1,62 @@
 # ==============================================================================
+# ⚠️ SCRIPT LIMITATIONS & ASSUMPTIONS
+# ==============================================================================
+# 1. ELEMENT TYPES: This code only reads and calculates failure for 2D Shell 
+#    composite elements (CQUAD4 and CTRIA3). 3D Solid elements are not supported.
+#
+# 2. MATERIAL DEFINITION: Assumes 2D Orthotropic materials (MAT8 property).
+#
+# 3. STRUCTURE TYPE: Designed for solid laminates. Failure modes unique to 
+#    Sandwich Panels (e.g., core shear, face wrinkling) are not evaluated.
+#
+# 4. ENVIRONMENTAL EFFECTS: Failure is based on mechanical stresses only. 
+#    Hygrothermal expansion effects are not explicitly calculated.
+#
+# 5. DATA SOURCE: Strictly parses MSC Nastran HDF5 (.h5) binary result files.
+#
+# 6. PUCK PARAMETERS: Uses standard inclination values (p12+=0.3, p12-=0.25, p22-=0.2).
+# ==============================================================================
+
+# ==============================================================================
+# 📐 GOVERNING EQUATIONS
+# ==============================================================================
+# 1. MAXIMUM STRESS:
+#    FI = max( s1/X, s2/Y, t12/S ) | RF = 1 / FI
+#
+# 2. MAXIMUM STRAIN (Hooke's Law Applied First):
+#    eps1 = (s1/E1) - (nu21*s2/E2) | eps2 = -(nu12*s1/E1) + (s2/E2)
+#    FI = max( eps1/eps1_u, eps2/eps2_u, gamma12/gamma12_u )
+#
+# 3. TSAI-HILL (Quadratic Interactive):
+#    FI = (s1/X)^2 - (s1*s2)/X^2 + (s2/Y)^2 + (t12/S)^2 | RF = 1 / sqrt(FI)
+#
+# 4. TSAI-WU (Tensor Polynomial):
+#    F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + F66*t12^2 + 2*F12*s1*s2 = FI
+#    RF calculated via ABC Quadratic Formula: (A)R^2 + (B)R - 1 = 0
+#
+# 5. HASHIN (1980):
+#    Fiber Tension (s1>0): FI = (s1/Xt)^2 + (t12/S)^2
+#    Fiber Compress (s1<0): FI = (|s1|/Xc)^2
+#    Matrix Tension (s2>0): FI = (s2/Yt)^2 + (t12/S)^2
+#    Matrix Compress (s2<0): FI = (|s2|/Yc)^2 + (t12/S)^2
+#
+# 6. PUCK 2D (Action Plane Theory):
+#    Fiber Failure (FF): Same as Max Stress.
+#    Inter-Fiber Failure (IFF):
+#    Mode A (s2>0): FI = sqrt((t12/S)^2 + (1-p12+*Yt/S)^2*(s2/Yt)^2) + p12+*s2/S
+#    Mode B (s2<0, low slope): FI = 1/S * (sqrt(t12^2 + (p12-*s2)^2) + p12-*s2)
+#    Mode C (s2<0, high slope): FI = [(t12/(2*(1+p22-)*S))^2 + (s2/Yc)^2] * (Yc/|s2|)
+#
+# 7. INTERLAMINAR SHEAR:
+#    FI = (t13/S13)^2 + (t23/S23)^2 | RF = 1 / sqrt(FI)
+#
+# 8. LAMINATE ABD MATRIX (CLPT):
+#    [A] = sum(Qbar * dt)           -> Extensional Stiffness
+#    [B] = 1/2 * sum(Qbar * dz^2)   -> Coupling Stiffness
+#    [D] = 1/3 * sum(Qbar * dz^3)   -> Bending Stiffness
+# ==============================================================================
+
+# ==============================================================================
 # IMPORT REQUIRED LIBRARIES
 # ==============================================================================
 import tables             # Library to read Nastran HDF5 binary database files
