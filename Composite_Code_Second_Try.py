@@ -1,5 +1,5 @@
 # ==============================================================================
-# ⚠️ SCRIPT LIMITATIONS & ASSUMPTIONS
+# SCRIPT LIMITATIONS & ASSUMPTIONS
 # ==============================================================================
 # 1. ELEMENT TYPES: This code only reads and calculates failure for 2D Shell 
 #    composite elements (CQUAD4 and CTRIA3). 3D Solid elements are not supported.
@@ -18,7 +18,7 @@
 # ==============================================================================
 
 # ==============================================================================
-# 📐 GOVERNING EQUATIONS
+# GOVERNING EQUATIONS
 # ==============================================================================
 # 1. MAXIMUM STRESS:
 #    FI = max( s1/X, s2/Y, t12/S ) | RF = 1 / FI
