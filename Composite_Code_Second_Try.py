@@ -2,15 +2,15 @@
 # SCRIPT LIMITATIONS & ASSUMPTIONS
 # ==============================================================================
 # 1. ELEMENT TYPES: This code only reads and calculates failure for 2D Shell 
-#    composite elements (CQUAD4 and CTRIA3). 3D Solid elements are not supported.
+#   composite elements (CQUAD4 and CTRIA3). 3D Solid elements are not supported.
 #
 # 2. MATERIAL DEFINITION: Assumes 2D Orthotropic materials (MAT8 property).
 #
 # 3. STRUCTURE TYPE: Designed for solid laminates. Failure modes unique to 
-#    Sandwich Panels (e.g., core shear, face wrinkling) are not evaluated.
+#   Sandwich Panels (e.g., core shear, face wrinkling) are not evaluated.
 #
 # 4. ENVIRONMENTAL EFFECTS: Failure is based on mechanical stresses only. 
-#    Hygrothermal expansion effects are not explicitly calculated.
+#   Hygrothermal expansion effects are not explicitly calculated.
 #
 # 5. DATA SOURCE: Strictly parses MSC Nastran HDF5 (.h5) binary result files.
 #
@@ -21,39 +21,39 @@
 # GOVERNING EQUATIONS
 # ==============================================================================
 # 1. MAXIMUM STRESS:
-#    FI = max( s1/X, s2/Y, t12/S ) | RF = 1 / FI
+#   FI = max( s1/X, s2/Y, t12/S ) | RF = 1 / FI
 #
 # 2. MAXIMUM STRAIN (Hooke's Law Applied First):
-#    eps1 = (s1/E1) - (nu21*s2/E2) | eps2 = -(nu12*s1/E1) + (s2/E2)
-#    FI = max( eps1/eps1_u, eps2/eps2_u, gamma12/gamma12_u )
+#   eps1 = (s1/E1) - (nu21*s2/E2) | eps2 = -(nu12*s1/E1) + (s2/E2)
+#   FI = max( eps1/eps1_u, eps2/eps2_u, gamma12/gamma12_u )
 #
 # 3. TSAI-HILL (Quadratic Interactive):
-#    FI = (s1/X)^2 - (s1*s2)/X^2 + (s2/Y)^2 + (t12/S)^2 | RF = 1 / sqrt(FI)
+#   FI = (s1/X)^2 - (s1*s2)/X^2 + (s2/Y)^2 + (t12/S)^2 | RF = 1 / sqrt(FI)
 #
 # 4. TSAI-WU (Tensor Polynomial):
-#    F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + F66*t12^2 + 2*F12*s1*s2 = FI
-#    RF calculated via ABC Quadratic Formula: (A)R^2 + (B)R - 1 = 0
+#   F1*s1 + F2*s2 + F11*s1^2 + F22*s2^2 + F66*t12^2 + 2*F12*s1*s2 = FI
+#   RF calculated via ABC Quadratic Formula: (A)R^2 + (B)R - 1 = 0
 #
 # 5. HASHIN (1980):
-#    Fiber Tension (s1>0): FI = (s1/Xt)^2 + (t12/S)^2
-#    Fiber Compress (s1<0): FI = (|s1|/Xc)^2
-#    Matrix Tension (s2>0): FI = (s2/Yt)^2 + (t12/S)^2
-#    Matrix Compress (s2<0): FI = (|s2|/Yc)^2 + (t12/S)^2
+#   Fiber Tension (s1>0): FI = (s1/Xt)^2 + (t12/S)^2
+#   Fiber Compress (s1<0): FI = (|s1|/Xc)^2
+#   Matrix Tension (s2>0): FI = (s2/Yt)^2 + (t12/S)^2
+#   Matrix Compress (s2<0): FI = (|s2|/Yc)^2 + (t12/S)^2
 #
 # 6. PUCK 2D (Action Plane Theory):
-#    Fiber Failure (FF): Same as Max Stress.
-#    Inter-Fiber Failure (IFF):
-#    Mode A (s2>0): FI = sqrt((t12/S)^2 + (1-p12+*Yt/S)^2*(s2/Yt)^2) + p12+*s2/S
-#    Mode B (s2<0, low slope): FI = 1/S * (sqrt(t12^2 + (p12-*s2)^2) + p12-*s2)
-#    Mode C (s2<0, high slope): FI = [(t12/(2*(1+p22-)*S))^2 + (s2/Yc)^2] * (Yc/|s2|)
+#   Fiber Failure (FF): Same as Max Stress.
+#   Inter-Fiber Failure (IFF):
+#   Mode A (s2>0): FI = sqrt((t12/S)^2 + (1-p12+*Yt/S)^2*(s2/Yt)^2) + p12+*s2/S
+#   Mode B (s2<0, low slope): FI = 1/S * (sqrt(t12^2 + (p12-*s2)^2) + p12-*s2)
+#   Mode C (s2<0, high slope): FI = [(t12/(2*(1+p22-)*S))^2 + (s2/Yc)^2] * (Yc/|s2|)
 #
 # 7. INTERLAMINAR SHEAR:
-#    FI = (t13/S13)^2 + (t23/S23)^2 | RF = 1 / sqrt(FI)
+#   FI = (t13/S13)^2 + (t23/S23)^2 | RF = 1 / sqrt(FI)
 #
 # 8. LAMINATE ABD MATRIX (CLPT):
-#    [A] = sum(Qbar * dt)           -> Extensional Stiffness
-#    [B] = 1/2 * sum(Qbar * dz^2)   -> Coupling Stiffness
-#    [D] = 1/3 * sum(Qbar * dz^3)   -> Bending Stiffness
+#   [A] = sum(Qbar * dt)           -> Extensional Stiffness
+#   [B] = 1/2 * sum(Qbar * dz^2)   -> Coupling Stiffness
+#   [D] = 1/3 * sum(Qbar * dz^3)   -> Bending Stiffness
 # ==============================================================================
 
 # ==============================================================================
@@ -123,7 +123,7 @@ def analyze_composite_failure(df, props):
         ms = rf - 1.0
         return rf, ms
 
-    # --- A. MAXIMUM STRESS CRITERION ---
+    # A. MAXIMUM STRESS CRITERION 
     fi_1_maxs = np.where(s1 > 0, s1 / Xt, np.abs(s1) / Xc)
     fi_2_maxs = np.where(s2 > 0, s2 / Yt, np.abs(s2) / Yc)
     fi_12_maxs = np.abs(t12) / S 
@@ -139,7 +139,7 @@ def analyze_composite_failure(df, props):
         elif fm == f2 and sig2 <= 0: modes_ms.append("Matrix Compression")
         else: modes_ms.append("In-Plane Shear")
 
-    # --- B. MAXIMUM STRAIN CRITERION ---
+    # B. MAXIMUM STRAIN CRITERION 
     eps_1T, eps_1C = Xt / E1, Xc / E1; eps_2T, eps_2C = Yt / E2, Yc / E2; gamma_12u = S / G12
     nu21 = (nu12 * E2) / E1 if E1 > 1e-6 else 0.0
     eps1_act = (s1 / E1) - (nu21 * s2 / E2); eps2_act = -(nu12 * s1 / E1) + (s2 / E2); gamma12_act = t12 / G12
@@ -150,12 +150,12 @@ def analyze_composite_failure(df, props):
     fi_max_strain = np.maximum.reduce([fi_1_maxe, fi_2_maxe, fi_12_maxe])
     rf_max_strain, ms_max_strain = calc_rf_ms(fi_max_strain, is_quadratic=False)
 
-    # --- C. TSAI-HILL CRITERION ---
+    # C. TSAI-HILL CRITERION 
     X_hill = np.where(s1 > 0, Xt, Xc); Y_hill = np.where(s2 > 0, Yt, Yc)
     fi_tsai_hill = (s1 / X_hill)**2 - (s1 * s2) / (X_hill**2) + (s2 / Y_hill)**2 + (t12 / S)**2
     rf_tsai_hill, ms_tsai_hill = calc_rf_ms(fi_tsai_hill, is_quadratic=True)
 
-    # --- D. TSAI-WU CRITERION ---
+    # D. TSAI-WU CRITERION 
     F1 = (1.0 / Xt) - (1.0 / Xc); F2 = (1.0 / Yt) - (1.0 / Yc)
     F11 = 1.0 / (Xt * Xc); F22 = 1.0 / (Yt * Yc); F66 = 1.0 / (S**2)
     F12 = -0.5 * np.sqrt(F11 * F22) 
@@ -170,7 +170,7 @@ def analyze_composite_failure(df, props):
     rf_tsai_wu[(A_tw <= 1e-12) & (B_tw <= 1e-12)] = 999.9
     ms_tsai_wu = rf_tsai_wu - 1.0
 
-    # --- E. HASHIN CRITERION (1980 2D) ---
+    # E. HASHIN CRITERION (1980 2D) 
     fi_h_ft = np.where(s1 > 0, (s1/Xt)**2 + (t12/S)**2, 0)
     fi_h_fc = np.where(s1 <= 0, (np.abs(s1)/Xc)**2, 0)
     fi_h_mt = np.where(s2 > 0, (s2/Yt)**2 + (t12/S)**2, 0)
@@ -186,7 +186,7 @@ def analyze_composite_failure(df, props):
         elif fm == mt: hashin_modes.append("Matrix Tension")
         else: hashin_modes.append("Matrix Compression")
 
-    # --- F. PUCK 2D CRITERION (Action Plane) ---
+    # F. PUCK 2D CRITERION (Action Plane) 
     p12_plus = 0.3; p12_minus = 0.25; p22_minus = 0.2 
     
     fi_p_ff_t = np.where(s1 >= 0, s1/Xt, 0)
@@ -214,11 +214,11 @@ def analyze_composite_failure(df, props):
         elif fm == ib: puck_modes.append("IFF Mode B (Compression)")
         else: puck_modes.append("IFF Mode C (Compression)")
 
-    # --- G. INTERLAMINAR SHEAR (DELAMINATION) ---
+    # G. INTERLAMINAR SHEAR (DELAMINATION) 
     fi_ils = (t13 / S13)**2 + (t23 / S23)**2
     rf_ils, ms_ils = calc_rf_ms(fi_ils, is_quadratic=True)
 
-    # --- COMPILE OUTPUT DATAFRAME ---
+    # COMPILE OUTPUT DATAFRAME 
     out_df = df.copy()
     out_df['Max_Stress_FI'] = fi_max_stress; out_df['Max_Stress_RF'] = rf_max_stress; out_df['Max_Stress_MS'] = ms_max_stress; out_df['Max_Stress_Mode'] = modes_ms
     out_df['Max_Strain_FI'] = fi_max_strain; out_df['Max_Strain_RF'] = rf_max_strain; out_df['Max_Strain_MS'] = ms_max_strain
@@ -504,7 +504,7 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
         'Tau_23': f'Tau_23 [{unit_str}]'
     })
 
-    # --- SHEET: EXECUTIVE SUMMARY ---
+    # SHEET: EXECUTIVE SUMMARY 
     ws_sum = wb.add_worksheet('Executive_Summary')
     ws_sum.merge_range('B2:H3', f"AEROSPACE COMPOSITE ANALYSIS REPORT", fmt_title)
     ws_sum.write('B4', f"File: {base_name}.h5", wb.add_format({'italic':True}))
@@ -560,21 +560,21 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
                 ws.conditional_format(f'{col_let}2:{col_let}{last_row}', {'type':'cell', 'criteria':'>=', 'value':0, 'format':fmt_grn})
             else: ws.set_column(i, i, 12, fmt_gen)
 
-    # --- SHEET: RAW STRESSES ---
+    # SHEET: RAW STRESSES 
     raw_cols = ['Load_Case', 'Element ID', 'Element Type', 'Ply Info', 
                 f'Sigma_11 [{unit_str}]', f'Sigma_22 [{unit_str}]', 
                 f'Tau_12 [{unit_str}]', f'Tau_13 [{unit_str}]', f'Tau_23 [{unit_str}]']
     write_sheet(df_formatted, 'Raw_Stresses', raw_cols)
 
-    # --- SHEET: BASIC CRITERIA ---
+    # SHEET: BASIC CRITERIA 
     basic_cols = ['Load_Case', 'Element ID', 'Ply Info', 'Max_Stress_FI', 'Max_Stress_RF', 'Max_Stress_MS', 'Max_Stress_Mode', 'Max_Strain_FI', 'Max_Strain_RF', 'Max_Strain_MS']
     write_sheet(df_formatted, 'Basic_Criteria', basic_cols)
 
-    # --- SHEET: ADVANCED CRITERIA ---
+    # SHEET: ADVANCED CRITERIA 
     adv_cols = ['Load_Case', 'Element ID', 'Ply Info', 'Tsai_Hill_FI', 'Tsai_Hill_RF', 'Tsai_Hill_MS', 'Tsai_Wu_FI', 'Tsai_Wu_RF', 'Tsai_Wu_MS', 'Hashin_FI', 'Hashin_RF', 'Hashin_MS', 'Hashin_Mode', 'Puck_FI', 'Puck_RF', 'Puck_MS', 'Puck_Mode', 'Interlaminar_FI', 'Interlaminar_RF', 'Interlaminar_MS']
     write_sheet(df_formatted, 'Advanced_Criteria', adv_cols)
 
-    # --- SHEET: ABD MATRICES ---
+    # SHEET: ABD MATRICES 
     if df_abd is not None and not df_abd.empty:
         df_abd.to_excel(writer, sheet_name='Laminate_ABD', index=False)
         ws_abd = writer.sheets['Laminate_ABD']
@@ -583,7 +583,7 @@ def save_composite_report_6sheets(df_res, df_abd, props, output_excel, base_name
             ws_abd.write(0, i, c, fmt_head)
             ws_abd.set_column(i, i, 20, fmt_gen if i < 2 else fmt_num2)
 
-    # --- SHEET: VISUAL GRAPHS ---
+    # SHEET: VISUAL GRAPHS 
     ws_g = wb.add_worksheet('Visual_Graphs')
     ws_g.merge_range('B2:M3', "FAILURE ENVELOPE VISUALIZATION", fmt_title)
     ws_g.hide_gridlines(2)
@@ -808,7 +808,7 @@ def main():
                         except: pass
                                 
             if not mat_selected:
-                print("\n  --- MANUAL MATERIAL PROPERTY INPUT ---")
+                print("\n   MANUAL MATERIAL PROPERTY INPUT ")
                 while True:
                     try:
                         mat_selected = {
@@ -840,10 +840,10 @@ def main():
             try: open(output_excel, 'a').close()
             except: print(f"\n[ERROR] Close the file {os.path.basename(output_excel)} first!"); input(); continue
             
-            # --- CALCULATE ALL CRITERIA ---
+            # CALCULATE ALL CRITERIA 
             df_results = analyze_composite_failure(df_raw, mat_selected)
             
-            # --- CALCULATE ABD MATRIX ---
+            # CALCULATE ABD MATRIX 
             df_abd = calculate_abd_matrices(pcomp_raw, mat_selected) if pcomp_raw else None
             
             if top_n > 0:
